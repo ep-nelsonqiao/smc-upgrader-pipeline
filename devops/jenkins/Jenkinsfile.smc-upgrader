@@ -1,0 +1,188 @@
+String currentProjectVersion = "N/A"
+String nextReleaseVersion = "N/A"
+String nextDevelopmentVersion = "N/A"
+String releaseId = "N/A"
+String tagName = "N/A"
+
+pipeline {
+
+	agent {
+		label "node-small-persisted"
+	}
+
+	parameters {
+		string(
+				name: 'DOCKER_IMAGE_TAG',
+				defaultValue: '648265802301.dkr.ecr.us-west-2.amazonaws.com/ep/maven:3.6.2-centos-zulu-8u412',
+				description: 'Docker image URL'
+		)
+		string(
+				name: 'OWNER',
+				defaultValue: 'elasticpath',
+				description: 'Owner on github'
+		)
+		string(
+				name: 'REPO',
+				defaultValue: 'smc-upgrader',
+				description: 'The repository of the release project'
+		)
+		string(
+				name: 'TOKEN',
+				defaultValue: '',
+				description: 'The token to access repo by api'
+		)
+		string(
+				name: 'BRANCH',
+				defaultValue: 'main',
+				description: 'The branch for release'
+		)
+		string(
+				name: 'RELEASE_LEVEL',
+				defaultValue: 'patch',
+				description: 'The release level,for instance: major,minor or patch'
+		)
+		string(
+				name: 'USER_EMAIL',
+				defaultValue: 'github-bot@elasticpath.com',
+				description: 'The user email for github.com'
+		)
+		string(
+				name: 'USER_NAME',
+				defaultValue: 'github-bot',
+				description: 'The user name for github.com'
+		)
+		string(
+				name: 'RELEASE_NOTE',
+				defaultValue: 'Description of the release',
+				description: 'The release note'
+		)
+	}
+
+	stages {
+	    stage('Checkout') {
+            steps {
+                script {
+                	// clean the working folder
+                	sh 'sudo find . -mindepth 1 -delete'
+                	sh 'ls -la'
+                	
+
+                    // Define SCM configuration
+                    git branch: params.BRANCH, url: "https://${params.USER_NAME}:${params.TOKEN}@github.com/${params.OWNER}/${params.REPO}.git"
+                    sh 'git tag'
+                }
+            }
+        }
+		stage('Pull Docker Image') {
+			steps {
+				// Pull the Docker image from docker registry.
+				script {
+					sh(
+						label: 'Set credential for aws.',
+						script: """
+							aws ecr get-login-password --region="us-west-2" | docker login --username AWS --password-stdin 648265802301.dkr.ecr.us-west-2.amazonaws.com
+						"""
+					)
+					docker.image(params.DOCKER_IMAGE_TAG).pull()
+					echo "Image is pulled successfully."
+				}
+			}
+		}
+
+		stage ('Build'){
+		    steps {
+		        script {
+		            docker.image(params.DOCKER_IMAGE_TAG).inside("-u root") {
+						sh 'java -version'
+						sh 'mvn -v'
+						currentProjectVersion = getCurrentVersion()
+						nextReleaseVersion = currentProjectVersion.split('-')[0]
+					}
+
+					docker.image('alpine/semver:5.5.0').inside(){
+					    
+					    nextDevelopmentVersion = determineProjectVersion(params.RELEASE_LEVEL, nextReleaseVersion)
+					}
+
+					nextDevelopmentVersion = nextDevelopmentVersion + "-SNAPSHOT"
+					
+					echo "The next release version is ${nextReleaseVersion}"
+					echo "The next development version is ${nextDevelopmentVersion}"
+					
+					tagName = "${params.REPO}-${nextReleaseVersion}"
+					
+					
+					docker.image(params.DOCKER_IMAGE_TAG).inside("-u root") {
+
+	                    release(nextReleaseVersion, nextDevelopmentVersion)
+
+					}
+
+					releaseId = createRelease(nextReleaseVersion, tagName)
+
+					echo "The release id is ${releaseId}"
+
+					uploadBinary(nextReleaseVersion, releaseId)
+		        }
+		    }
+		}
+
+	}
+}
+
+String getCurrentVersion(){
+	return sh (
+		label: 'Determine project version',
+		script: 'mvn help:evaluate -Dexpression=project.version -q -DforceStdout',
+		returnStdout: true	
+	).replace("\n",'')
+}
+
+void release(String nextReleaseVersion,String nextDevelopmentVersion){
+	sh "git config --global user.email '${params.USER_EMAIL}'"
+	sh "git config --global user.name '${params.USER_NAME}'"
+
+	sh "mvn -B -ntp release:prepare -DreleaseVersion=${nextReleaseVersion} -Dtag=${params.REPO}-${nextReleaseVersion} -DdevelopmentVersion=${nextDevelopmentVersion} -Ddeveloper.connection=scm:git:https://${params.USER_NAME}:${params.TOKEN}@github.com/${params.OWNER}/${params.REPO}.git"
+
+	sh 'mvn -B -ntp release:perform -Darguments="-Dmaven.deploy.skip=true  -Dmaven.site.skip=true -Dmaven.site.deploy.skip=true"'
+}
+
+String determineProjectVersion(String releaseLevel, String currentReleaseVersion) {
+	return sh(
+		label: 'Determine project version',
+		script: "semver -c -i ${releaseLevel} '${currentReleaseVersion}'",
+		returnStdout: true
+	).replace("\n",'')
+}
+
+String createRelease(String nextReleaseVersion,String tagName){
+	return sh (
+		label: 'Create Release',
+		script: """
+			curl -L \
+			  -X POST \
+			  -H "Accept: application/vnd.github+json" \
+			  -H "Authorization: Bearer $params.TOKEN" \
+			  -H "X-GitHub-Api-Version: 2022-11-28" \
+			  https://api.github.com/repos/${params.OWNER}/${params.REPO}/releases \
+			  -d '{"tag_name":"${tagName}","target_commitish":"${params.BRANCH}","name":"${nextReleaseVersion}","body":"${params.RELEASE_NOTE}","draft":false,"prerelease":true,"generate_release_notes":false}' | jq '.id'
+		""",
+		returnStdout: true
+	).replace("\n",'')
+}
+
+void uploadBinary(String nextReleaseVersion,String releaseId){
+	sh (
+		label: 'Upload Binary',
+		script: """
+			curl -L \
+			  -X POST \
+			  -H "Accept: application/vnd.github+json" \
+			  -H "Authorization: Bearer $params.TOKEN" \
+			  -H "X-GitHub-Api-Version: 2022-11-28" \
+			  -H "Content-Type: application/octet-stream" \
+			  "https://uploads.github.com/repos/${params.OWNER}/${params.REPO}/releases/${releaseId}/assets?name=${params.REPO}-${nextReleaseVersion}-jar-with-dependencies.jar" \
+			  --data-binary "@./target/checkout/target/${params.REPO}-${nextReleaseVersion}-jar-with-dependencies.jar" 
+		"""
+	)
+}
