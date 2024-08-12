@@ -27,7 +27,7 @@ pipeline {
 	                        scm: [
 	                        $class: 'GitSCM',
 	                        branches: [[name: params.BRANCH]],
-	                        userRemoteConfigs: [[url: git@github.com:elasticpath/smc-upgrader.git, credentialsId: params.JENKINS_CREDENTIAL_ID]]
+	                        userRemoteConfigs: [[url: "git@github.com:elasticpath/smc-upgrader.git", credentialsId: params.JENKINS_CREDENTIAL_ID]]
 	                        ]
 	                    ])
 	                    sh 'git tag'
