@@ -20,11 +20,18 @@ pipeline {
 				        sh 'mkdir smc-upgrader'
 				    }
 
-				    dir('smc-upgrader'){
+	                dir('smc-upgrader'){
 	                    // Define SCM configuration
-	                    git branch: params.BRANCH, url: "https://${params.USER_NAME}:${params.TOKEN}@github.com/${params.OWNER}/${params.REPO}.git"
-	                    sh 'git tag'				    
-				    }
+	                    checkout([
+	                        poll: false,
+	                        scm: [
+	                        $class: 'GitSCM',
+	                        branches: [[name: params.BRANCH]],
+	                        userRemoteConfigs: [[url: git@github.com:elasticpath/smc-upgrader.git, credentialsId: params.JENKINS_CREDENTIAL_ID]]
+	                        ]
+	                    ])
+	                    sh 'git tag'
+	                }
                 }
             }
         }
